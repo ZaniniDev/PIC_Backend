@@ -26,4 +26,7 @@ def get_db():
 
 def init_db():
     import models.usuario
+    import models.formulario
+    import models.resposta
+    import models.respostas_formulario
     Base.metadata.create_all(bind=engine)

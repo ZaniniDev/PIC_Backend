@@ -7,6 +7,7 @@ class Usuario(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     id_hash = Column(String)
+    level = Column(Integer, default=0)
     nome = Column(String)
     email = Column(String, unique=True, index=True)
     telefone = Column(String, unique=True, index=True, nullable=False)

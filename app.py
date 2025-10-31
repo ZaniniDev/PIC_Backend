@@ -3,7 +3,10 @@ from flask import Flask, request, jsonify, g
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token, get_jwt_identity
 from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
-from database import SessionLocal, get_db, init_db 
+from database import SessionLocal, init_db 
+from models.formulario import Formulario
+from models.resposta import Resposta
+from models.respostas_formulario import RespostaFormulario
 from models.usuario import Usuario
 from config import Config
 
@@ -16,8 +19,23 @@ app = Flask(__name__)
 app.config['JWT_SECRET_KEY'] = Config.JWT_SECRET_KEY
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=12)
 jwt = JWTManager(app)
+app.config['JSON_AS_ASCII'] = False
 
-# 🧩 Função para obter uma sessão do banco (padrão Flask)
+@jwt.invalid_token_loader
+def token_invalido_callback(error_string):
+    print(f"[JWT] Token inválido: {error_string}")
+    return {"erro": "Token inválido", "detalhes": error_string}, 401
+
+@jwt.unauthorized_loader
+def token_ausente_callback(error_string):
+    print(f"[JWT] Token ausente ou cabeçalho errado: {error_string}")
+    return {"erro": "Token ausente", "detalhes": error_string}, 401
+
+@jwt.expired_token_loader
+def token_expirado_callback(jwt_header, jwt_payload):
+    print(f"[JWT] Token expirado: {jwt_payload}")
+    return {"erro": "Token expirado"}, 401
+
 def get_session():
     db = SessionLocal()
     try:
@@ -65,24 +83,22 @@ def cadastrar():
         db.commit()
         db.refresh(novo_usuario)
         
-        # Criar token de acesso
-        token_acesso = create_access_token(identity=novo_usuario.telefone)
-        
         return jsonify({
             "mensagem": "Usuário registrado com sucesso",
-            "token_acesso": token_acesso,
             "usuario": {
                 "nome": novo_usuario.nome,
                 "telefone": novo_usuario.telefone,
                 "bairro": novo_usuario.bairro,
                 "cidade": novo_usuario.cidade,
-                "estado": novo_usuario.estado
+                "estado": novo_usuario.estado,
+                "level": novo_usuario.level
             }
         }), 201
         
     except IntegrityError:
         return jsonify({"erro": "Telefone já cadastrado"}), 409
     except Exception as e:
+        print(e)
         return jsonify({"erro": str(e)}), 500
 
 @app.route('/login', methods=['POST'])
@@ -120,20 +136,20 @@ def login():
             return jsonify({"erro": "Credenciais inválidas"}), 401
         
         # Criar token de acesso
-        token_acesso = create_access_token(identity=usuario.id)
+        token_acesso = create_access_token(identity=str(usuario.id))
         print(token_acesso)
         
         return jsonify({
             "mensagem": "Login realizado com sucesso",
             "token": token_acesso,
             "usuario": {
-                "id": usuario.id,
                 "nome": usuario.nome,
                 "data_nascimento": usuario.data_nascimento,
                 "telefone": usuario.telefone,
                 "bairro": usuario.bairro,
                 "cidade": usuario.cidade,
-                "estado": usuario.estado
+                "estado": usuario.estado,
+                "level": usuario.level
             }
         }), 200
         
@@ -146,7 +162,7 @@ def obter_perfil():
     db = get_session()
     try:
         
-        id_usuario_atual = get_jwt_identity()
+        id_usuario_atual = int(get_jwt_identity())
         usuario = db.query(Usuario).filter(Usuario.id == id_usuario_atual).first()
         
         if not usuario:
@@ -175,54 +191,137 @@ def obter_perfil():
     finally:
         db.close()
 
+@app.route('/usuario/formularios_respondidos', methods=['GET'])
+@jwt_required()
+def buscar_formularios_respondidos_usuario():
+    try:
+        id_usuario_atual = get_jwt_identity()
+    except Exception as e:
+        print("Erro ao validar token:", e)
+        return jsonify({"erro": "Token inválido", "detalhes": str(e)}), 401
+    
+    db = get_session()
+    try:
+        # Busca todos os ids de formulario respondido pelo usuario
+        ids_formularios = db.query(RespostaFormulario.id_formulario).filter(
+            RespostaFormulario.id_usuario == id_usuario_atual
+        ).distinct().all()
+
+        # Extrai apenas os IDs da tupla retornada pelo SQLAlchemy
+        lista_ids = [id_form[0] for id_form in ids_formularios]
+
+        print("Quantidade formulario respondidos:", len(lista_ids))
+
+        return jsonify({
+            "mensagem": "Formulários respondidos encontrados",
+            "ids_formularios": lista_ids
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"erro": "Erro ao buscar formulários", "detalhes": str(e)}), 500
+    finally:
+        db.close()
+
 @app.route('/formulario/responder', methods=['POST'])
 @jwt_required()
 def responder_formulario():
+    try:
+        identidade = get_jwt_identity()
+    except Exception as e:
+        print("Erro ao validar token:", e)
+        return {"valido": False, "erro": str(e)}, 401
+    
     id_usuario_atual = get_jwt_identity()
     data = request.get_json()
+    db = get_session()
 
     id_formulario = data.get('id_formulario')
-    nome_formulario = data.get('descricao_formulario')
-    perguntas = data.get('perguntas_respostas', [])
+    respostas = data.get('respostas')
 
-    # Verificação fictícia — aqui simulamos consulta no banco
-    ja_respondido = verificar_se_ja_respondeu(id_usuario_atual, id_formulario)
+    # Busca o formulario através do id no banco de dados
+    formulario = db.query(Formulario).filter(Formulario.id == id_formulario).first()
+    if not formulario:
+        return jsonify({"status": "error", "message": "Formulário não encontrado"}), 404
 
-    if ja_respondido:
+    # Busca a resposta do usuario para esse formulario
+    resposta_usuario_formulario = db.query(RespostaFormulario).filter(
+        RespostaFormulario.id_formulario == id_formulario,
+        RespostaFormulario.id_usuario == id_usuario_atual
+    ).first()
+
+    # Verifica se o usuário já respondeu o formulário
+    if resposta_usuario_formulario:
         return jsonify({
             "status": "error",
-            "message": f"Usuário {id_usuario_atual} já respondeu o formulário {nome_formulario}."
+            "message": f"formulario ja respondido"
         }), 400
 
     # 💾 Processar respostas (aqui apenas simulado)
-    for p in perguntas:
-        id_pergunta = p.get('id_pergunta')
-        descricao = p.get('descricao_pergunta')
-        resposta = p.get('resposta')
-        anexo = p.get('anexo')
+    for r in respostas:
+        pergunta = r.get('pergunta')
+        resposta = r.get('resposta')
+        tipo_pergunta = r.get('tipo_pergunta', 'texto')  # Padrão 'texto' se não especificado
 
-        print(f"Salvando resposta: {id_pergunta=} {descricao=} {resposta=} {anexo=}")
+        resposta = Resposta(
+            id_formulario=id_formulario,
+            id_usuario=id_usuario_atual,
+            pergunta=pergunta,
+            resposta=resposta,
+            tipo_pergunta=tipo_pergunta
+        )
+        db.add(resposta)
+        db.commit()
+        db.refresh(resposta)      
 
-        # Aqui você chamaria algo como:
-        # salvar_resposta(id_usuario_atual, id_formulario, id_pergunta, resposta, anexo)
+    # Adiciona a resposta na tabela respostasformulario
+    resposta_formulario = RespostaFormulario(
+        id_formulario=id_formulario,
+        id_usuario=id_usuario_atual,
+        respondido=datetime.utcnow(),
+        status="respondido"
+    )
+    db.add(resposta_formulario)
+    db.commit()
+    db.refresh(resposta_formulario) 
+
+    # Ajuste para a mensagem ir com utf-8
 
     return jsonify({
         "status": "success",
         "message": f"Respostas do formulário {id_formulario} registradas com sucesso para o usuário {id_usuario_atual}"
     }), 200
 
+@app.route('/formulario/respostas/all', methods=['GET'])
+@jwt_required()
+def obter_todas_respostas_formularios():
+    id_usuario_atual = get_jwt_identity()
 
-# --- Funções fictícias auxiliares --- #
-def verificar_se_ja_respondeu(id_usuario, id_formulario):
-    """
-    Verifica se o usuário já respondeu o formulário.
-    Aqui está uma simulação — em produção você consultaria o banco.
-    """
-    # Exemplo fictício: suponha que o usuário 10 respondeu o formulário 1
-    if id_usuario == 10 and id_formulario == 1:
-        return True
-    return False
+    db = get_session()
 
+    try:
+        respostas = db.query(Resposta).all()
+        
+        respostas_lista = []
+        for resposta in respostas:
+            respostas_lista.append({
+                "id_formulario": int(resposta.id_formulario),
+                "id_usuario": resposta.id_usuario,
+                "pergunta": resposta.pergunta,
+                "resposta": resposta.resposta,
+                "tipo_pergunta": resposta.tipo_pergunta,
+                "created_at": resposta.created_at.isoformat(),
+                "updated_at": resposta.updated_at.isoformat()
+            })
+        
+        return jsonify(
+            respostas_lista
+        ), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)

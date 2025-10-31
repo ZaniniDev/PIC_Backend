@@ -2,3 +2,6 @@ flask
 flask-jwt-extended
 sqlalchemy
 python-dateutil
+psycopg2
+python-dotenv
+gunicorn
