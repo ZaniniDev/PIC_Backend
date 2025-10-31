@@ -9,11 +9,13 @@ from models.resposta import Resposta
 from models.respostas_formulario import RespostaFormulario
 from models.usuario import Usuario
 from config import Config
+from flask_cors import CORS
 
 # Inicializa o banco antes de subir a API
 init_db()
 
 app = Flask(__name__)
+CORS(app)
 
 # Configuração JWT
 app.config['JWT_SECRET_KEY'] = Config.JWT_SECRET_KEY
